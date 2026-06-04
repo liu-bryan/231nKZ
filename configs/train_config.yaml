@@ -1,0 +1,67 @@
+# Training configuration for YOLOv8 fine-tuning.
+# All keys here are forwarded to ultralytics' YOLO.train().
+# See: https://docs.ultralytics.com/modes/train/#train-settings
+
+# --- Model & data ---
+model: yolov8s.pt            # Pretrained checkpoint to fine-tune from (n/s/m/l/x).
+data: data_random.yaml       # Dataset YAML. Swap to data_grouped.yaml for the
+                             # session-grouped split (stricter, no near-dup leakage).
+
+# --- Core training schedule ---
+epochs: 100
+patience: 25                 # Early-stopping patience (epochs without val improvement).
+batch: 16                    # -1 enables auto-batch sizing on GPU.
+imgsz: 640
+workers: 8
+device: 0                    # 0, "0,1", or "cpu".
+seed: 42
+deterministic: true
+amp: true                    # Mixed precision.
+cache: false                 # Set "ram" or "disk" if you have the space; speeds up training.
+
+# --- Optimizer ---
+optimizer: AdamW             # Or "SGD".
+lr0: 0.001                   # Initial LR (smaller than from-scratch since we're fine-tuning).
+lrf: 0.01                    # Final LR fraction (lr0 * lrf).
+momentum: 0.937
+weight_decay: 0.0005
+warmup_epochs: 3.0
+warmup_momentum: 0.8
+warmup_bias_lr: 0.1
+cos_lr: true                 # Cosine LR schedule.
+
+# --- Loss gains ---
+box: 7.5
+cls: 0.5
+dfl: 1.5
+
+# --- Built-in data augmentation (per-sample, applied online) ---
+# Geometric
+degrees: 5.0                 # Rotation (+/- deg).
+translate: 0.1               # Translation fraction of image size.
+scale: 0.5                   # Scale gain (+/-).
+shear: 2.0                   # Shear degrees.
+perspective: 0.0             # 0..0.001 typical; 0 disables.
+flipud: 0.0                  # Vertical flip prob.
+fliplr: 0.5                  # Horizontal flip prob.
+
+# Photometric (HSV)
+hsv_h: 0.015
+hsv_s: 0.7
+hsv_v: 0.4
+
+# Mix-style
+mosaic: 1.0                  # 4-image mosaic prob.
+close_mosaic: 10             # Disable mosaic for the last N epochs (cleaner fine-tune endgame).
+mixup: 0.1
+copy_paste: 0.1              # Requires segmentation masks; harmless if absent for detect.
+erasing: 0.4                 # Random erasing prob (classification-style; safe to keep low).
+
+# --- Output / logging ---
+project: runs/detect
+name: finetune
+exist_ok: false
+save: true
+save_period: -1              # Save every N epochs (-1 = only best/last).
+plots: true
+val: true

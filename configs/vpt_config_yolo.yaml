@@ -1,0 +1,62 @@
+# VPT pipeline A: YOLO detections -> IDM -> policy -> play
+# Trajectories must come from YOLO extract_objects only (data/trajectories/yolo/).
+
+action_space:
+  type: multi_binary
+  buttons: [jump, left, down, right, interact, slow_mo, attack]
+  aim_bins: 16
+
+observation:
+  num_object_types: 18
+  max_objects: 32
+  feat_dim: 6
+  global_dim: 0
+  player_class_id: 10
+  cursor_class_id: 2
+
+model:
+  d_model: 128
+  transformer_layers: 2
+  transformer_heads: 4
+  lstm_hidden: 256
+  dropout: 0.1
+
+pipeline:
+  name: yolo
+  detector: yolo
+  detector_weights: runs/detect/finetune/weights/best.pt
+
+data:
+  labeled_dir: data/trajectories/yolo/labeled
+  unlabeled_dir: data/trajectories/yolo/unlabeled
+  pseudo_labeled_dir: data/trajectories/yolo/pseudo_labeled
+  sequence_length: 64
+  stride: 32
+  idm_frame_gap: 1
+
+idm:
+  d_model: 128
+  transformer_layers: 3
+  transformer_heads: 4
+  epochs: 30
+  batch_size: 256
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  ckpt: checkpoints/yolo/idm/best.pt
+
+bc:
+  epochs: 50
+  batch_size: 32
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  warmup_steps: 500
+  ckpt: checkpoints/yolo/policy/best.pt
+  val_fraction: 0.1
+  pseudo_label_weight: 0.5
+  aim_loss_weight: 1.0
+
+device: mps
+num_workers: 4
+seed: 42

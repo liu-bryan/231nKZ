@@ -1,0 +1,56 @@
+# Training configuration for RT-DETR fine-tuning (Ultralytics).
+# RT-DETR is a transformer-based detector; uses the same YOLO-format dataset
+# as YOLOv8 (data_random.yaml / data_grouped.yaml).
+# See: https://docs.ultralytics.com/models/rtdetr/
+
+# --- Model & data ---
+model: rtdetr-l.pt           # rtdetr-l.pt (default) or rtdetr-x.pt (larger/slower).
+data: data_random.yaml       # Same dataset YAML as YOLO. Prefer data_grouped.yaml
+                             # for an honest val split when comparing models.
+
+# --- Core training schedule ---
+epochs: 100
+patience: 25
+batch: 8                     # RT-DETR is heavier than YOLO; use 4–8 on M3 if OOM.
+imgsz: 640
+workers: 8
+device: mps                  # Apple Silicon. RT-DETR needs grid_sample backward, which
+                             # is not on MPS — train_rtdetr.py sets PYTORCH_ENABLE_MPS_FALLBACK=1
+                             # automatically (unsupported ops run on CPU). Use device: cpu
+                             # if fallback is still flaky; YOLO trains fine on pure MPS.
+seed: 42
+deterministic: true
+amp: true
+cache: false
+
+# --- Optimizer ---
+optimizer: AdamW
+lr0: 0.0001                  # RT-DETR typically uses a smaller LR than YOLO.
+lrf: 0.01
+momentum: 0.937
+weight_decay: 0.0001
+warmup_epochs: 3.0
+warmup_momentum: 0.8
+warmup_bias_lr: 0.1
+cos_lr: true
+
+# --- Augmentation (subset; RT-DETR ignores YOLO-only knobs like mosaic/dfl) ---
+degrees: 5.0
+translate: 0.1
+scale: 0.5
+shear: 2.0
+perspective: 0.0
+flipud: 0.0
+fliplr: 0.5
+hsv_h: 0.015
+hsv_s: 0.7
+hsv_v: 0.4
+
+# --- Output / logging ---
+project: runs/rtdetr
+name: finetune
+exist_ok: false
+save: true
+save_period: -1
+plots: true
+val: true
