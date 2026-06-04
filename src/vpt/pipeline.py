@@ -1,7 +1,8 @@
-"""Named VPT pipelines: YOLO and RT-DETR are fully separate end-to-end paths.
+"""Named detector paths: YOLO vs RT-DETR.
 
-Each pipeline has its own trajectory folders, IDM checkpoint, and policy checkpoint.
-Never mix object lists from both detectors in one observation.
+Each path has its own trajectory folders and detector weights. IDM and policy
+checkpoints are shared (see configs/vpt_config_*.yaml). Never merge object lists
+from both detectors in one observation.
 """
 
 from __future__ import annotations

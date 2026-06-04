@@ -1,11 +1,11 @@
 """Compare two independent pipelines on the same video (evaluation only).
 
 Each frame is processed twice — never merged into one object list:
-  Pipeline A: YOLO  -> YOLO object list  -> YOLO policy  -> actions
-  Pipeline B: RT-DETR -> RT-DETR object list -> RT-DETR policy -> actions
+  Path A: YOLO  -> object list A -> shared policy -> actions
+  Path B: RT-DETR -> object list B -> shared policy -> actions
 
-By default each pipeline uses its own config and policy checkpoint. Pass
---shared-policy only for an ablation (one policy, two detectors).
+By default both paths load the same bc.ckpt from config (checkpoints/shared/policy/).
+Pass --shared-policy to override that checkpoint explicitly.
 
 Usage:
     python -m src.vpt.compare_policy --source recording.mp4 --device mps

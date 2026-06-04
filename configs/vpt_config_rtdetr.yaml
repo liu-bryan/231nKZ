@@ -1,5 +1,5 @@
-# VPT pipeline B: RT-DETR detections -> IDM -> policy -> play
-# Trajectories must come from RT-DETR extract_objects only (data/trajectories/rtdetr/).
+# Pipeline B (RT-DETR): detector-specific trajectories; same IDM + policy weights as YOLO.
+# extract_objects must write under data/trajectories/rtdetr/ only.
 
 action_space:
   type: multi_binary
@@ -43,7 +43,7 @@ idm:
   lr: 3.0e-4
   weight_decay: 1.0e-4
   grad_clip: 1.0
-  ckpt: checkpoints/rtdetr/idm/best.pt
+  ckpt: checkpoints/shared/idm/best.pt
 
 bc:
   epochs: 50
@@ -52,7 +52,7 @@ bc:
   weight_decay: 1.0e-4
   grad_clip: 1.0
   warmup_steps: 500
-  ckpt: checkpoints/rtdetr/policy/best.pt
+  ckpt: checkpoints/shared/policy/best.pt
   val_fraction: 0.1
   pseudo_label_weight: 0.5
   aim_loss_weight: 1.0

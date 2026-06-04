@@ -110,7 +110,7 @@ python -m src.compare_models \
 
 Prints mAP50, mAP50-95, precision, recall side-by-side, plus optional mean inference ms/image on the val folder. Prefer `data_grouped.yaml` so neither model sees near-duplicate val frames during training.
 
-> **Phase 2:** YOLO and RT-DETR are **two separate pipelines** (separate trajectories, IDM, policy, play). See [Two independent pipelines](#two-independent-pipelines).
+> **Phase 2:** YOLO and RT-DETR are **two detector paths** into one shared controller (one IDM, one policy). Object lists are **never merged**. See [Two detector paths, one policy](#two-detector-paths-one-shared-policy).
 
 ## 8. Tips for fine-tuning
 
@@ -149,40 +149,48 @@ Without `--show`, all frames are written to `runs/visualize/` automatically. Pla
 
 # Phase 2: VPT-style policy on object detections
 
-Train a policy on **object lists** (not pixels): detector → tracker → transformer + LSTM → buttons + aim. **YOLO and RT-DETR are two fully separate pipelines** — each has its own trajectories, IDM, policy checkpoint, and `play` invocation. Object lists from the two detectors are **never combined** into one observation.
+Train a policy on **object lists** (not pixels): detector → tracker → transformer + LSTM → buttons + aim.
 
-> **Phase 1 prerequisite for aim:** the **in-game crosshair must be a labeled detection class.** Set `player_class_id` / `cursor_class_id` in the pipeline config to match `data.yaml`.
+**Two detectors, one controller.** YOLOv8 and RT-DETR are fine-tuned separately (Phase 1) and each produces its **own** per-frame object lists (`data/trajectories/yolo/` vs `data/trajectories/rtdetr/`). Lists are **never fused**. The **same** inverse-dynamics model (IDM) and **same** policy weights $\pi_\theta$ are used for both paths: at play time you only swap which detector feeds the policy.
 
-## Two independent pipelines
+> **Phase 1 prerequisite for aim:** the **in-game crosshair must be a labeled detection class.** Set `player_class_id` / `cursor_class_id` in either pipeline config to match `data.yaml`.
 
-```
-Pipeline A (YOLO)                         Pipeline B (RT-DETR)
-─────────────────                         ─────────────────────
-video → YOLO(best.pt)                     video → RT-DETR(best.pt)
-     → tracker → object list A                 → tracker → object list B
-     → IDM (yolo) → pseudo-label               → IDM (rtdetr) → pseudo-label
-     → policy (yolo) → play                    → policy (rtdetr) → play
-
-Config:  configs/vpt_config_yolo.yaml       configs/vpt_config_rtdetr.yaml
-Data:    data/trajectories/yolo/            data/trajectories/rtdetr/
-Ckpts:   checkpoints/yolo/idm|policy/       checkpoints/rtdetr/idm|policy/
-```
-
-Shared policy block (same architecture in both; **separate weights** trained on that pipeline’s trajectories only):
+## Two detector paths, one shared policy
 
 ```
-object list [(type, x,y,w,h,vx,vy), ...]   # from ONE detector only
+                    ┌── YOLO(best.pt)  → tracker → list A ──┐
+video (same game) ──┤                                        ├──► shared IDM (train once)
+                    └── RT-DETR(best.pt) → tracker → list B ┘         │
+                                                                        ▼
+                                                              shared policy π_θ (BC once)
+                                                                        │
+                                        ┌───────────────────────────────┴───────────────────────────────┐
+                                        ▼                                                               ▼
+                              play / runner --pipeline yolo                              play / runner --pipeline rtdetr
+                              (list A + shared π_θ)                                    (list B + shared π_θ)
+```
+
+| What differs per path | What is shared |
+|----------------------|----------------|
+| Detector weights (`runs/detect/...`, `runs/rtdetr/...`) | IDM: `checkpoints/shared/idm/best.pt` |
+| Trajectory folders (`data/trajectories/yolo/` vs `rtdetr/`) | Policy: `checkpoints/shared/policy/best.pt` |
+| `configs/vpt_config_{yolo,rtdetr}.yaml` (detector + data dirs only) | `play.py` control loop, action heads, class ids |
+
+Policy block (same architecture and **same checkpoint** for both paths):
+
+```
+object list [(type, x,y,w,h,vx,vy), ...]   # from ONE detector only — never merged
    → ObjectEncoder (transformer) → LSTM
    → ButtonHead + AimHead
 ```
 
-Use `--pipeline yolo` or `--pipeline rtdetr` on training/play CLIs to pick the config. `src/vpt/compare_policy` runs both pipelines on the same video for **evaluation only** (two independent inferences per frame, not a merged list).
+Use `--pipeline yolo` or `--pipeline rtdetr` on `extract_objects`, `pseudo_label`, `play`, and `runner` to pick the detector and trajectory directories. Both configs point at the shared IDM/policy paths above.
 
-Three training stages, mirroring the VPT paper:
+**Training order** (mirrors VPT; IDM/BC run **once**, not per detector):
 
-1. **IDM** — train an inverse-dynamics model that predicts the action between two consecutive object lists, using a small amount of human-labeled gameplay.
-2. **Pseudo-label** — run the IDM over YouTube/Twitch VODs to auto-generate action labels.
-3. **BC** — behaviorally clone the policy on (labeled + pseudo-labeled) data. Optional RL fine-tuning if you have a sim hook.
+1. **IDM** — train on human-labeled trajectories (default: YOLO object lists in `data/trajectories/yolo/labeled/`). Predicts buttons between consecutive frames.
+2. **Pseudo-label** — run that IDM on unlabeled VODs **per detector** (YOLO lists and RT-DETR lists in separate folders).
+3. **BC** — behavior-clone the shared policy on labeled (+ optional pseudo-labeled) data. We used ground-truth keystroke labels on the YOLO trajectory tree; the same $\pi_\theta$ is then evaluated with either detector at inference.
 
 ### Policy model architecture (`src/vpt/model.py`)
 
@@ -193,7 +201,7 @@ Three training stages, mirroring the VPT paper:
 | Temporal | 1-layer LSTM, `hidden=256` | — (single-step between frames) |
 | Heads | 7× BCE buttons + 16-way aim CE | MLP → button logits only |
 
-Configurable in `configs/vpt_config.yaml` (`model.*`, `action_space.*`, `observation.*`). No external pretrained policy weights — train from scratch on your trajectories (YOLO or RT-DETR object lists).
+Configurable in `configs/vpt_config_yolo.yaml` / `vpt_config_rtdetr.yaml` (`model.*`, `action_space.*`, `observation.*` — identical between files). No external pretrained policy weights; train from scratch on your labeled gameplay.
 
 ## File layout
 
@@ -223,21 +231,31 @@ src/play.py                      # live window capture + runner + pynput
 
 ```
 data/trajectories/
-  yolo/          unlabeled/  labeled/  pseudo_labeled/   # Pipeline A only
-  rtdetr/        unlabeled/  labeled/  pseudo_labeled/   # Pipeline B only
+  yolo/          unlabeled/  labeled/  pseudo_labeled/   # YOLO object lists only
+  rtdetr/        unlabeled/  labeled/  pseudo_labeled/   # RT-DETR object lists only
 checkpoints/
-  yolo/          idm/best.pt  policy/best.pt
-  rtdetr/        idm/best.pt  policy/best.pt
+  shared/        idm/best.pt   policy/best.pt            # one IDM + one policy for both paths
 configs/
-  vpt_config_yolo.yaml
-  vpt_config_rtdetr.yaml
-  vpt_config.yaml          # legacy flat layout (avoid for new work)
+  vpt_config_yolo.yaml       # detector A + yolo data dirs
+  vpt_config_rtdetr.yaml     # detector B + rtdetr data dirs (same idm/bc ckpt paths)
 runs/
   detect/finetune/weights/best.pt
   rtdetr/finetune/weights/best.pt
 ```
 
-### Pipeline A — YOLO (end-to-end)
+### Step 0 — Shared IDM + policy (run once)
+
+After you have human-labeled YOLO trajectories (`data/trajectories/yolo/labeled/*.npz`):
+
+```bash
+python -m src.vpt.train_idm --pipeline yolo
+python -m src.vpt.pseudo_label --pipeline yolo
+python -m src.vpt.train_bc --pipeline yolo
+```
+
+Writes `checkpoints/shared/idm/best.pt` and `checkpoints/shared/policy/best.pt`. Both pipeline configs reference these paths.
+
+### Path A — YOLO detections
 
 ```bash
 # 1) Objects from YOLO only
@@ -246,23 +264,20 @@ python -m src.vpt.extract_objects --pipeline yolo \
   --source recordings/session.mp4 \
   --out data/trajectories/yolo/unlabeled/session.npz
 
-# 2) Label (same log/video for both pipelines if you run B too)
+# 2) Attach human keys (same JSONL can be reused for path B after RT-DETR extract)
 python -m src.vpt.log_to_actions \
   --trajectory data/trajectories/yolo/unlabeled/session.npz \
   --log logs/run_session.jsonl \
   --out data/trajectories/yolo/labeled/session.npz
 
-# 3) Train
-python -m src.vpt.train_idm --pipeline yolo
-python -m src.vpt.pseudo_label --pipeline yolo
-python -m src.vpt.train_bc --pipeline yolo
+# 3) If not done in Step 0: train shared IDM/BC on yolo/labeled (commands above)
 
-# 4) Play
+# 4) Play with YOLO lists + shared policy
 python -m src.play --pipeline yolo --dry-run
 python -m src.play --pipeline yolo
 ```
 
-### Pipeline B — RT-DETR (end-to-end)
+### Path B — RT-DETR detections
 
 ```bash
 python -m src.vpt.extract_objects --pipeline rtdetr \
@@ -271,22 +286,23 @@ python -m src.vpt.extract_objects --pipeline rtdetr \
   --source recordings/session.mp4 \
   --out data/trajectories/rtdetr/unlabeled/session.npz
 
+# Optional: labeled RT-DETR .npz for analysis (same keystroke log as path A)
 python -m src.vpt.log_to_actions \
   --trajectory data/trajectories/rtdetr/unlabeled/session.npz \
   --log logs/run_session.jsonl \
   --out data/trajectories/rtdetr/labeled/session.npz
 
-python -m src.vpt.train_idm --pipeline rtdetr
+# Pseudo-label RT-DETR unlabeled VODs with the shared IDM (do not re-train IDM)
 python -m src.vpt.pseudo_label --pipeline rtdetr
-python -m src.vpt.train_bc --pipeline rtdetr
 
+# Play: RT-DETR lists + same policy checkpoint as YOLO
 python -m src.play --pipeline rtdetr --dry-run
 python -m src.play --pipeline rtdetr
 ```
 
 ### Katana ZERO action mapping
 
-The pipeline expects this 7-button multi-binary vector (configured in `configs/vpt_config.yaml`):
+The pipeline expects this 7-button multi-binary vector (configured in `configs/vpt_config_yolo.yaml` / `vpt_config_rtdetr.yaml`):
 
 | Slot | Button name | Physical input |
 |------|-------------|----------------|
@@ -302,17 +318,17 @@ Plus a **parallel aim head**: a softmax over `action_space.aim_bins` (default 16
 
 Velocity (`vx`, `vy`) is derived per-track inside `extract_objects.py`. No game-state channel (HP, slow_mo gauge) is logged, so `observation.global_dim` stays at 0; bump it later if you ever wire up a memory reader or pixel-tap for those.
 
-> **Required class ids.** `observation.player_class_id` and `observation.cursor_class_id` in `configs/vpt_config.yaml` MUST match the class indices in your `data.yaml` (same for YOLO and RT-DETR — both use identical labels). Aim labels are silently empty if they're wrong — `log_to_actions.py` prints a warning when no frame has both the player and the cursor detected.
+> **Required class ids.** `observation.player_class_id` and `observation.cursor_class_id` in the pipeline configs MUST match the class indices in your `data.yaml` (identical for YOLO and RT-DETR). Aim labels are silently empty if they're wrong — `log_to_actions.py` prints a warning when no frame has both the player and the cursor detected.
 
-## Comparing the two pipelines
+## Comparing the two detector paths
 
 | What | Command |
 |------|---------|
 | Detection mAP only | `python -m src.compare_models` (Phase 1 §7) |
 | Full pipeline actions (eval) | `python -m src.vpt.compare_policy --source recording.mp4` |
-| Live agent | `python -m src.play --pipeline yolo` **or** `--pipeline rtdetr` |
+| Live agent | `python -m src.play --pipeline yolo` **or** `--pipeline rtdetr` (same policy weights) |
 
-`compare_policy` runs **two separate** `Runner`s (YOLO+YOLO policy, RT-DETR+RT-DETR policy). It does not merge detections. Optional `--shared-policy` is an ablation only.
+`compare_policy` runs two `Runner`s on each frame: YOLO→list A→$\pi_\theta$ and RT-DETR→list B→$\pi_\theta$. By default both use `checkpoints/shared/policy/best.pt` (same weights, different observations). It does **not** merge detections. `--shared-policy` overrides that path only if you want an explicit checkpoint argument.
 
 `src/vpt/detector.py` loads **one** detector per call; `extract_objects` / `Runner` / `play` each produce a single object list per frame.
 
@@ -353,31 +369,34 @@ Move the unlabeled `.npz` out of `unlabeled/` once you've labeled it (or run `lo
 
 `attach_actions.py` remains as a generic CSV → labeled NPZ tool if you ever want to label something other than Katana ZERO gameplay.
 
-## 4. Train the IDM
+## 4. Train the IDM (once)
 
 ```bash
 python -m src.vpt.train_idm --pipeline yolo
-# or
-python -m src.vpt.train_idm --pipeline rtdetr
 ```
 
-The IDM is 3 transformer layers over both frames' objects (with a frame-id embedding so it knows "before" vs "after"), then an MLP head. Watch the validation accuracy — it should reach high exact-match accuracy on the held-out pairs before you trust it for pseudo-labeling. If it caps out at low accuracy, your action labels are probably misaligned with the frames or the action depends on info not present in object lists (e.g. menu state).
+Uses `data/trajectories/yolo/labeled/` by default; saves to `checkpoints/shared/idm/best.pt`. **Do not** train a second IDM for RT-DETR—the same weights pseudo-label both trajectory trees.
 
-The IDM predicts **buttons only**. Aim is directly observable (the cursor is a detected object), so it does not need to be inferred — it's computed deterministically from the object list for both labeled and pseudo-labeled trajectories.
+The IDM is 3 transformer layers over consecutive object lists (frame-id embeddings for $t$ vs $t{+}1$), then button logits. Watch validation accuracy before trusting pseudo-labels. Low accuracy usually means misaligned logs or missing state in the lists.
 
-## 5. Pseudo-label unlabeled VODs
+The IDM predicts **buttons only**. Aim comes from the crosshair detection (`src/vpt/aim.py`) on labeled and pseudo-labeled trajectories.
+
+## 5. Pseudo-label unlabeled VODs (per detector)
 
 ```bash
 python -m src.vpt.pseudo_label --pipeline yolo
 python -m src.vpt.pseudo_label --pipeline rtdetr
 ```
 
-## 6. Train the policy via BC
+Each call reads/writes under that pipeline's `unlabeled` / `pseudo_labeled` dirs but loads the **shared** IDM checkpoint from config.
+
+## 6. Train the policy via BC (once)
 
 ```bash
 python -m src.vpt.train_bc --pipeline yolo
-python -m src.vpt.train_bc --pipeline rtdetr
 ```
+
+Trains `checkpoints/shared/policy/best.pt` on `yolo/labeled` + `yolo/pseudo_labeled` by default. RT-DETR play still uses this same policy; only the detector-fed object lists change.
 
 Pseudo-labeled samples are down-weighted by `bc.pseudo_label_weight` (default 0.5) — bump it up if your IDM is very accurate, down if it's noisy. The policy trains two heads jointly: buttons (BCE) and aim (16-way CE, masked to frames where both player and cursor are detected, weighted by `bc.aim_loss_weight`). Each epoch prints `acc` (per-button) and `aim_acc` (direction-bin accuracy on supervised frames).
 
@@ -385,7 +404,7 @@ Pseudo-labeled samples are down-weighted by `bc.pseudo_label_weight` (default 0.
 
 ### Video replay (`src/vpt/runner`)
 
-One pipeline per invocation — one detector, one object list, one policy:
+One detector per invocation — one object list, **shared** policy weights:
 
 ```bash
 python -m src.vpt.runner --pipeline yolo --source recordings/test.mp4
@@ -394,14 +413,14 @@ python -m src.vpt.runner --pipeline rtdetr --source recordings/test.mp4
 
 | Flag | Purpose |
 |------|---------|
-| `--pipeline` | `yolo` or `rtdetr` (sets config, default weights, policy path) |
+| `--pipeline` | `yolo` or `rtdetr` (detector + trajectory dirs; same `bc.ckpt` in both configs) |
 | `--weights` / `--yolo` | Override detector `.pt` |
 | `--policy` | Override policy checkpoint |
 | `--source` | Video file |
 
 ### Compare pipelines (`src/vpt/compare_policy`)
 
-Evaluation only: same frame → **Pipeline A** and **Pipeline B** independently (no merged object list). Default: `checkpoints/yolo/policy/best.pt` vs `checkpoints/rtdetr/policy/best.pt`.
+Evaluation only: same frame → YOLO path and RT-DETR path independently (no merged list). Default: both use `checkpoints/shared/policy/best.pt`.
 
 ```bash
 python -m src.vpt.compare_policy --source recordings/test.mp4 --device mps
@@ -421,7 +440,7 @@ python -m src.play --pipeline rtdetr
 
 | Flag | Purpose |
 |------|---------|
-| `--pipeline` | **`yolo` or `rtdetr`** — picks config + default detector + policy |
+| `--pipeline` | **`yolo` or `rtdetr`** — picks detector; policy defaults to `checkpoints/shared/policy/best.pt` |
 | `--weights` / `--yolo` | Override detector weights |
 | `--policy` | Override policy path |
 | `--detect-only` | Detector only (one object list, no policy) |
@@ -434,7 +453,7 @@ python -m src.play --pipeline rtdetr
 ## Practical notes (from the design transcript)
 
 - **Object detection quality is the bottleneck.** If detections are jittery or drop objects, both IDM and policy will be noisy. Re-train YOLO/RT-DETR on more data before you blame the policy. Run `compare_policy` to see whether policy disagreement is mostly from missed objects vs. box jitter.
-- **Two pipelines, never merge lists.** Train and play with `--pipeline yolo` or `--pipeline rtdetr` only. `compare_policy` is for side-by-side eval, not production input.
+- **Two detectors, one policy, never merge lists.** Extract and play with `--pipeline yolo` or `--pipeline rtdetr`; IDM and BC train once. `compare_policy` is side-by-side eval (same $\pi_\theta$, different object lists).
 - **RT-DETR on Apple Silicon (MPS)** is slower (CPU fallback for some ops). On **Windows/Linux with CUDA**, RT-DETR is usually faster than on M3 but still heavier than YOLO at inference. Prefer YOLO for live play unless RT-DETR wins on `compare_policy`.
 - **Velocity matters more than position.** A still-frame snapshot can't tell you an enemy is winding up an attack; velocity often can. Both are included in `feats=(x,y,w,h,vx,vy)`.
 - **Add global features for hidden state.** Things like "slow-mo gauge", current HP, or menu-open flag aren't visible to YOLO. Set `observation.global_dim > 0` and pass them via `--globals` in `attach_actions.py`.
