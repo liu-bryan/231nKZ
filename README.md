@@ -1,6 +1,6 @@
-# YOLOv8 Fine-tuning Pipeline
+# YOLOv8 and RT-DETR Fine-tuning -> IDM / VPT Policy Gameplay Pipeline
 
-Fine-tune a pretrained YOLOv8 detection model on your custom dataset, with configurable augmentation, validation, and export.
+Fine-tune a pretrained YOLOv8 and RT-DETR detection model on your custom Katana Zero dataset, with configurable augmentation, validation, and export. Then, use an IDM / VPT Policy to behavior-clone on real and pseudo-labelled gameplay to learn how to roughly play the game.
 
 ## 1. Install
 
@@ -33,8 +33,9 @@ path: ./dataset
 train: images/train
 val: images/val
 names:
-  0: cat
-  1: dog
+  0: Player
+  1: Crosshair
+... etc.
 ```
 
 ## 3. Train
